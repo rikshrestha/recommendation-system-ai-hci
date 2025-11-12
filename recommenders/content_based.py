@@ -1,11 +1,39 @@
 # recommenders/content_based.py
+# Minimal, grad-ready improvements: basic logging, small safeguards, fast lookups.
 
-from typing import List
+from __future__ import annotations
+
+from typing import List, Optional
+from pathlib import Path
+import logging
+
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 from .base import BaseRecommender
+
+
+# ---------------------------------------------------------------------
+# Tiny logger to a dedicated file; quiet by default in console.
+# ---------------------------------------------------------------------
+def _get_logger() -> logging.Logger:
+    logger = logging.getLogger("recommender_core")
+    logger.setLevel(logging.INFO)
+
+    # Avoid duplicate handlers on Streamlit reruns
+    if logger.handlers:
+        return logger
+
+    Path("logs").mkdir(parents=True, exist_ok=True)
+    fh = logging.FileHandler("logs/content_based.log", encoding="utf-8")
+    fh.setLevel(logging.INFO)
+    fh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+    logger.addHandler(fh)
+    return logger
+
+
+log = _get_logger()
 
 
 class ImdbContentBasedRecommender(BaseRecommender):
@@ -23,14 +51,28 @@ class ImdbContentBasedRecommender(BaseRecommender):
 
     def __init__(self, csv_path: str = "data/movie_metadata.csv"):
         self.csv_path = csv_path
-        self.movies_df: pd.DataFrame | None = None
+        self.movies_df: Optional[pd.DataFrame] = None
         self.tfidf_matrix = None
         self.similarity_matrix = None
+        self._title_to_index: dict[str, int] = {}
 
         self._fit()
 
+    # -----------------------------
+    # Data loading & cleaning
+    # -----------------------------
     def _load_and_clean(self) -> pd.DataFrame:
-        df = pd.read_csv(self.csv_path)
+        p = Path(self.csv_path)
+        if not p.exists():
+            msg = f"Dataset not found at: {p.resolve()}"
+            log.error(msg)
+            raise FileNotFoundError(msg)
+
+        try:
+            df = pd.read_csv(self.csv_path)
+        except Exception as e:
+            log.exception("Failed to read dataset: %s", self.csv_path)
+            raise RuntimeError(f"Dataset could not be read: {e}") from e
 
         # Keep only rows with a movie title and something to work with
         df = df.dropna(subset=["movie_title", "genres"])
@@ -39,69 +81,76 @@ class ImdbContentBasedRecommender(BaseRecommender):
         for col in [
             "movie_title", "director_name", "actor_1_name",
             "actor_2_name", "actor_3_name", "genres", "plot_keywords",
-            "language", "country", "content_rating"
+            "language", "country", "content_rating",
         ]:
             if col in df.columns:
-                df[col] = df[col].fillna("").astype(str).str.strip()
+                # strip, coerce to str, and normalize NBSP \xa0 which appears in this dataset
+                df[col] = (
+                    df[col]
+                    .fillna("")
+                    .astype(str)
+                    .str.replace("\xa0", " ", regex=False)
+                    .str.strip()
+                )
 
         # Convert pipe-separated fields to space-separated tokens
         # e.g. "Action|Adventure|Sci-Fi" -> "Action Adventure Sci-Fi"
-        if "genres" in df.columns:
-            df["genres_clean"] = df["genres"].str.replace("|", " ", regex=False)
-        else:
-            df["genres_clean"] = ""
+        df["genres_clean"] = df["genres"].str.replace("|", " ", regex=False) if "genres" in df.columns else ""
+        df["plot_keywords_clean"] = (
+            df["plot_keywords"].str.replace("|", " ", regex=False) if "plot_keywords" in df.columns else ""
+        )
 
-        if "plot_keywords" in df.columns:
-            df["plot_keywords_clean"] = df["plot_keywords"].str.replace("|", " ", regex=False)
-        else:
-            df["plot_keywords_clean"] = ""
+        # Numeric fields we may display or filter on
+        for col in ("duration", "title_year", "imdb_score"):
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        # Some numeric fields that may be useful to display later
-        if "duration" in df.columns:
-            df["duration"] = pd.to_numeric(df["duration"], errors="coerce")
-
-        if "title_year" in df.columns:
-            df["title_year"] = pd.to_numeric(df["title_year"], errors="coerce")
-
-        if "imdb_score" in df.columns:
-            df["imdb_score"] = pd.to_numeric(df["imdb_score"], errors="coerce")
-
-        # Drop rows that completely lack language (optional)
         if "language" in df.columns:
             df["language"] = df["language"].replace("", "Unknown")
 
-        return df
+        log.info("Loaded %d movies from %s", len(df), p.name)
+        return df.reset_index(drop=True)
 
+    # -----------------------------
+    # Feature engineering
+    # -----------------------------
     def _build_text_features(self, df: pd.DataFrame) -> pd.Series:
         """
         Combine multiple descriptive text fields into one "bag of words"
         representation used for TF–IDF.
         """
         parts = [
-            df["genres_clean"],
-            df["plot_keywords_clean"],
-            df["director_name"],
-            df["actor_1_name"],
-            df["actor_2_name"],
-            df["actor_3_name"],
+            df.get("genres_clean", pd.Series("", index=df.index)),
+            df.get("plot_keywords_clean", pd.Series("", index=df.index)),
+            df.get("director_name", pd.Series("", index=df.index)),
+            df.get("actor_1_name", pd.Series("", index=df.index)),
+            df.get("actor_2_name", pd.Series("", index=df.index)),
+            df.get("actor_3_name", pd.Series("", index=df.index)),
         ]
 
-        # Concatenate with spaces between parts
         text_features = parts[0]
         for p in parts[1:]:
             text_features = text_features + " " + p
 
+        # Ensure string dtype and strip (guard against all-empty)
+        text_features = text_features.fillna("").astype(str).str.strip()
         return text_features
 
+    # -----------------------------
+    # Model build
+    # -----------------------------
     def _fit(self) -> None:
         """Load data, build text features, TF–IDF matrix, and similarity matrix."""
         df = self._load_and_clean()
-        df = df.reset_index(drop=True)
 
-        # Build text features
+        # Build text features and drop rows with no usable text (rare)
         df["text_features"] = self._build_text_features(df)
+        df = df[df["text_features"] != ""].reset_index(drop=True)
+        if df.empty:
+            msg = "After preprocessing, no movies had usable text features."
+            log.error(msg)
+            raise ValueError(msg)
 
-        # Save cleaned df
         self.movies_df = df
 
         # Vectorize with TF–IDF
@@ -109,14 +158,27 @@ class ImdbContentBasedRecommender(BaseRecommender):
         self.tfidf_matrix = vectorizer.fit_transform(df["text_features"])
 
         # Precompute cosine similarity (OK for a few thousand movies)
-        self.similarity_matrix = cosine_similarity(self.tfidf_matrix,
-                                                   self.tfidf_matrix)
+        self.similarity_matrix = cosine_similarity(self.tfidf_matrix, self.tfidf_matrix)
 
+        # Fast lookup: title -> row index (last occurrence wins if duplicates)
+        self._title_to_index = {title: i for i, title in enumerate(df["movie_title"])}
+
+        log.info(
+            "TF–IDF shape: %s | Similarity matrix: %s | Titles indexed: %d",
+            tuple(self.tfidf_matrix.shape),
+            tuple(self.similarity_matrix.shape),
+            len(self._title_to_index),
+        )
+
+    # -----------------------------
+    # Public API
+    # -----------------------------
     def get_items(self) -> List[str]:
         """Return a sorted list of unique movie titles."""
-        # movie_title in this dataset often has trailing spaces or weird chars; we've stripped.
+        if self.movies_df is None:
+            return []
         titles = self.movies_df["movie_title"].tolist()
-        # Optionally deduplicate while preserving order
+        # Deduplicate while preserving first occurrence
         seen = set()
         unique_titles: List[str] = []
         for t in titles:
@@ -138,15 +200,16 @@ class ImdbContentBasedRecommender(BaseRecommender):
           - explanation
           - score (similarity)
         """
-        if item_title not in self.movies_df["movie_title"].values:
+        if self.movies_df is None or self.similarity_matrix is None:
+            raise RuntimeError("Recommender not initialized. Call constructor first.")
+
+        if item_title not in self._title_to_index:
             raise ValueError(f"Title '{item_title}' not found in dataset.")
 
-        # Index of the selected movie
-        idx = self.movies_df.index[self.movies_df["movie_title"] == item_title][0]
+        idx = self._title_to_index[item_title]
 
         # Similarity scores vs all movies
         sim_scores = list(enumerate(self.similarity_matrix[idx]))
-
         # Sort by similarity (descending) and skip the first (same movie)
         sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)[1 : top_n + 1]
 
@@ -158,16 +221,12 @@ class ImdbContentBasedRecommender(BaseRecommender):
 
         # Build simple HCI-friendly explanations based on overlapping genres
         selected_genres_raw = self.movies_df.loc[idx, "genres"]
-        selected_genres = set(
-            g.strip() for g in selected_genres_raw.split("|") if g.strip()
-        )
+        selected_genres = set(g.strip() for g in selected_genres_raw.split("|") if g.strip())
 
         explanations: list[str] = []
         for _, row in results.iterrows():
             movie_genres_raw = row["genres"]
-            movie_genres = set(
-                g.strip() for g in movie_genres_raw.split("|") if g.strip()
-            )
+            movie_genres = set(g.strip() for g in movie_genres_raw.split("|") if g.strip())
             common = selected_genres.intersection(movie_genres)
             if common:
                 reason = f"Shares genres: {', '.join(sorted(common))}"
@@ -179,15 +238,10 @@ class ImdbContentBasedRecommender(BaseRecommender):
 
         # Select a subset of columns to return
         cols = ["movie_title", "genres"]
-        if "imdb_score" in results.columns:
-            cols.append("imdb_score")
-        if "language" in results.columns:
-            cols.append("language")
-        if "country" in results.columns:
-            cols.append("country")
-        if "content_rating" in results.columns:
-            cols.append("content_rating")
-
+        for c in ("imdb_score", "language", "country", "content_rating"):
+            if c in results.columns:
+                cols.append(c)
         cols.extend(["score", "explanation"])
 
+        log.info("Generated %d recommendations for '%s'", len(results), item_title)
         return results[cols]

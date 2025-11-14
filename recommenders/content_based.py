@@ -1,5 +1,4 @@
 # recommenders/content_based.py
-# Minimal, grad-ready improvements: basic logging, small safeguards, fast lookups.
 
 from __future__ import annotations
 
@@ -30,6 +29,7 @@ def _get_logger() -> logging.Logger:
     fh.setLevel(logging.INFO)
     fh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
     logger.addHandler(fh)
+
     return logger
 
 
@@ -63,6 +63,7 @@ class ImdbContentBasedRecommender(BaseRecommender):
     # -----------------------------
     def _load_and_clean(self) -> pd.DataFrame:
         p = Path(self.csv_path)
+        
         if not p.exists():
             msg = f"Dataset not found at: {p.resolve()}"
             log.error(msg)
@@ -70,6 +71,7 @@ class ImdbContentBasedRecommender(BaseRecommender):
 
         try:
             df = pd.read_csv(self.csv_path)
+        
         except Exception as e:
             log.exception("Failed to read dataset: %s", self.csv_path)
             raise RuntimeError(f"Dataset could not be read: {e}") from e
@@ -146,6 +148,7 @@ class ImdbContentBasedRecommender(BaseRecommender):
         # Build text features and drop rows with no usable text (rare)
         df["text_features"] = self._build_text_features(df)
         df = df[df["text_features"] != ""].reset_index(drop=True)
+
         if df.empty:
             msg = "After preprocessing, no movies had usable text features."
             log.error(msg)
@@ -174,17 +177,22 @@ class ImdbContentBasedRecommender(BaseRecommender):
     # Public API
     # -----------------------------
     def get_items(self) -> List[str]:
+
         """Return a sorted list of unique movie titles."""
         if self.movies_df is None:
             return []
+
         titles = self.movies_df["movie_title"].tolist()
+
         # Deduplicate while preserving first occurrence
         seen = set()
         unique_titles: List[str] = []
+
         for t in titles:
             if t not in seen:
                 seen.add(t)
                 unique_titles.append(t)
+        
         return sorted(unique_titles)
 
     def recommend(self, item_title: str, top_n: int = 5) -> pd.DataFrame:
@@ -210,6 +218,7 @@ class ImdbContentBasedRecommender(BaseRecommender):
 
         # Similarity scores vs all movies
         sim_scores = list(enumerate(self.similarity_matrix[idx]))
+
         # Sort by similarity (descending) and skip the first (same movie)
         sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)[1 : top_n + 1]
 
@@ -228,19 +237,24 @@ class ImdbContentBasedRecommender(BaseRecommender):
             movie_genres_raw = row["genres"]
             movie_genres = set(g.strip() for g in movie_genres_raw.split("|") if g.strip())
             common = selected_genres.intersection(movie_genres)
+
             if common:
                 reason = f"Shares genres: {', '.join(sorted(common))}"
+            
             else:
                 reason = "Similar themes/keywords based on description."
+            
             explanations.append(reason)
 
         results["explanation"] = explanations
 
         # Select a subset of columns to return
         cols = ["movie_title", "genres"]
+
         for c in ("imdb_score", "language", "country", "content_rating"):
             if c in results.columns:
                 cols.append(c)
+        
         cols.extend(["score", "explanation"])
 
         log.info("Generated %d recommendations for '%s'", len(results), item_title)

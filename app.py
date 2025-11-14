@@ -86,11 +86,13 @@ def get_recommender() -> ImdbContentBasedRecommender:
 # -----------------------------
 def verify_dataset(path_str: str) -> None:
     p = Path(path_str)
+    
     if not p.exists():
         msg = f"Dataset not found at: {p.resolve()}"
         log.error(msg)
         st.error(msg)
         st.stop()
+    
     if p.stat().st_size == 0:
         msg = f"Dataset file is empty: {p.resolve()}"
         log.error(msg)

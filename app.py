@@ -1,7 +1,7 @@
 # app.py
 # IMDb Content-Based Movie Recommender (AI/HCI)
 # Minimal logging + basic defensive checks
-# Author: <Your Name>
+# Author: Rikrish Shrestha
 
 from __future__ import annotations
 

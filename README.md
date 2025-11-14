@@ -2,8 +2,8 @@
 
 **Course:** AI in Human–Computer Interaction  
 **Institution:** University of the Cumberlands  
-**Author:** <Your Name>  
-**Instructor:** <Instructor’s Name>  
+**Author:** Rikrish Shrestha  
+**Instructor:** Professor Jennifer Merritt  
 **Date:** November 2025
 
 ---
@@ -36,7 +36,6 @@ The application includes a graphical interface built with **Streamlit**, allowin
 recommendation-system-ai-hci/
 ├── app.py
 ├── README.md
-├── README.txt
 ├── requirements.txt
 ├── test_recommender.py
 ├── data/
